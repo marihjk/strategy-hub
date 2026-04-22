@@ -156,7 +156,7 @@ if not df_all.empty:
 # 3. 결과 출력 (탭 구성)
 # ==========================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 전체보기", "🏛️ KHIDI", "🏛️ NIPA", "🏛️ NIA", "🏛️ MSIT"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 전체보기", "🏛️ 한국보건산업진흥원(KHIDI)", "🏛️ 정보통신산업진흥원(NIPA)", "🏛️ 한국지능정보사회진흥원(NIA)", "🏛️ 과학기술정보통신부(MSIT)"])
 
 with tab1:
     st.subheader(f"조회 결과: {len(df_all)}건")
