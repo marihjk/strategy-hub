@@ -6,29 +6,28 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import urllib3
 from curl_cffi import requests as cffi_requests
-import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 # 보안 경고 숨기기
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 페이지 기본 설정
+# 페이지 설정
 st.set_page_config(page_title="전략 정보 HUB", page_icon="🗓️", layout="wide")
 
+# 대제목 노출 (로딩 전 즉시 노출)
 st.title("🗓️ 주요 사업 공고")
-st.markdown("유관기관 사업공고 실시간 모니터링 대시보드")
+st.markdown("### 유관기관 사업공고 실시간 모니터링 대시보드")
 st.divider()
 
 # ==========================================
-# 1. 데이터 수집 함수 (강력한 전천후 탐색 + 5페이지 루프)
+# 1. 데이터 수집 함수 정의
 # ==========================================
 
-# [함수 1] 보건산업진흥원(KHIDI) - OpenAPI (기본 50건)
 @st.cache_data(ttl=3600)
 def get_khidi_data():
     url = "https://www.khidi.or.kr/kps/openAPI/requestxml?rowCnt=50&menuId=MENU01108"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=15)
         root = ET.fromstring(response.content)
         data = []
         for row in root.findall('row'):
@@ -39,207 +38,143 @@ def get_khidi_data():
         return pd.DataFrame(data)
     except: return pd.DataFrame()
 
-# [함수 2] 정보통신산업진흥원(NIPA) - 1~5페이지
 @st.cache_data(ttl=3600)
 def get_nipa_data():
     all_data = []
     for page in range(1, 6):
         url = f"https://www.nipa.kr/home/2-2?curPage={page}"
         try:
-            res = cffi_requests.get(url, impersonate="chrome116", verify=False, timeout=10)
+            res = cffi_requests.get(url, impersonate="chrome120", verify=False, timeout=15)
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 본문 영역의 모든 링크 탐색 (가장 확실한 방식)
-            links = soup.select('a[href*="View.do"], .board-list a, .board_list a, table a')
-            for a in links:
-                title = a.get_text(strip=True)
+            # NIPA: tr과 li 구조를 동시에 탐색
+            items = soup.select('.board-list ul li, .board_list tbody tr, table tbody tr, a[href*="View.do"]')
+            for item in items:
+                a_tag = item if item.name == 'a' else item.select_one('a')
+                if not a_tag: continue
+                title = a_tag.get_text(strip=True)
                 if len(title) < 10: continue
-                href = a.get('href', '')
+                href = a_tag.get('href', '')
                 link = "https://www.nipa.kr" + href if href.startswith('/') else url
-                
-                # 부모 요소를 뒤져서 날짜와 신청기간 추출
-                parent = a.find_parent(['li', 'tr', 'div'])
-                parent_text = parent.get_text(separator=' ', strip=True) if parent else ""
-                
-                period_match = re.search(r'신청기간\s*[:]\s*([0-9\-\:\s~]+)', parent_text)
-                period = period_match.group(1).strip() if period_match else "공고문 참조"
-                
-                date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', parent_text)
-                date_str = date_match.group().replace('-', '.') if date_match else "날짜 확인 필요"
-                
-                all_data.append({"기관": "정보통신산업진흥원", "공고일": date_str, "제목": title, "접수기간": period, "원문링크": link})
+                row_text = item.get_text(separator=' ', strip=True)
+                date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', row_text)
+                date_str = date_match.group().replace('-', '.') if date_match else datetime.now().strftime('%Y.%m.%d')
+                all_data.append({"기관": "정보통신산업진흥원", "공고일": date_str, "제목": title, "접수기간": "공고문 참조", "원문링크": link})
         except: continue
     return pd.DataFrame(all_data).drop_duplicates(subset=['제목']) if all_data else pd.DataFrame()
 
-# [함수 3] 한국지능정보사회진흥원(NIA) - 1~5페이지
 @st.cache_data(ttl=3600)
 def get_nia_data():
     all_data = []
     for page in range(1, 6):
         url = f"https://www.nia.or.kr/site/nia_kor/ex/bbs/List.do?cbIdx=99835&pageIndex={page}"
         try:
-            res = cffi_requests.get(url, impersonate="chrome116", verify=False, timeout=10)
+            res = cffi_requests.get(url, impersonate="chrome120", verify=False, timeout=15)
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 모든 링크를 긁어온 뒤 날짜가 있는 것만 필터링 (가장 강력한 유실 방지책)
-            links = soup.select('a[href]')
+            links = soup.select('a[href*="View.do"], .board_list a, .tit a')
             for a in links:
                 title = a.get_text(strip=True)
                 if len(title) < 10: continue
-                
-                parent = a.find_parent(['li', 'tr', 'div'])
-                parent_text = parent.get_text(separator=' ', strip=True) if parent else ""
-                
-                date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', parent_text)
-                if not date_match: continue # 날짜가 없는 링크(메뉴 등)는 버림
-                
                 href = a.get('href', '')
                 link = "https://www.nia.or.kr/site/nia_kor/ex/bbs/" + href if not href.startswith('http') else href
-                date_str = date_match.group().replace('-', '.')
-                
+                parent = a.find_parent(['li', 'tr', 'div'])
+                parent_text = parent.get_text() if parent else ""
+                date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', parent_text)
+                date_str = date_match.group().replace('-', '.') if date_match else datetime.now().strftime('%Y.%m.%d')
                 all_data.append({"기관": "한국지능정보사회진흥원", "공고일": date_str, "제목": title, "접수기간": "공고문 참조", "원문링크": link})
         except: continue
     return pd.DataFrame(all_data).drop_duplicates(subset=['제목']) if all_data else pd.DataFrame()
 
-# [함수 4] 과학기술정보통신부(MSIT) - 1~5페이지
 @st.cache_data(ttl=3600)
 def get_msit_data():
     all_data = []
-    # 과기부 전용 헤더 추가 (Referer 필수)
-    msit_headers = {
-        'Referer': 'https://msit.go.kr/bbs/list.do?sCode=user&mId=311&mPid=121',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
-    }
-    
+    headers = {'Referer': 'https://msit.go.kr/bbs/list.do?sCode=user&mId=311&mPid=121'}
     for page in range(1, 6):
         url = f"https://msit.go.kr/bbs/list.do?sCode=user&mId=311&mPid=121&pageIndex={page}&bbsSeqNo=100"
         try:
-            # impersonate="chrome120"과 전용 헤더 사용
-            res = cffi_requests.get(url, impersonate="chrome120", headers=msit_headers, verify=False, timeout=15)
+            res = cffi_requests.get(url, impersonate="chrome120", headers=headers, verify=False, timeout=20)
             res.encoding = 'utf-8'
             soup = BeautifulSoup(res.text, 'html.parser')
-            
-            # 1. 모든 'view.do' 링크가 포함된 행(tr)을 싹 훑습니다.
             rows = soup.find_all('tr')
             for row in rows:
-                a_tag = row.select_one('a[href*="view.do"]')
-                if not a_tag: continue
-                
-                title = a_tag.get_text(strip=True)
-                if len(title) < 5: continue # 너무 짧은 텍스트 제외
-                
-                href = a_tag.get('href', '')
+                a = row.select_one('a[href*="view.do"]')
+                if not a: continue
+                title = a.get_text(strip=True)
+                if len(title) < 5: continue
+                href = a.get('href', '')
                 link = "https://msit.go.kr" + href if href.startswith('/') else url
-                
-                # 2. 날짜 찾기: 행 내에서 YYYY-MM-DD 패턴을 가진 모든 텍스트 검색
                 row_text = row.get_text(separator=' ', strip=True)
                 date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', row_text)
-                date_str = date_match.group().replace('-', '.') if date_match else "날짜 확인 필요"
-                
+                date_str = date_match.group().replace('-', '.') if date_match else datetime.now().strftime('%Y.%m.%d')
                 all_data.append({"기관": "과학기술정보통신부", "공고일": date_str, "제목": title, "접수기간": "공고문 참조", "원문링크": link})
         except: continue
-        
-    df = pd.DataFrame(all_data)
-    if not df.empty:
-        return df.drop_duplicates(subset=['제목'])
-    return pd.DataFrame()
+    return pd.DataFrame(all_data).drop_duplicates(subset=['제목']) if all_data else pd.DataFrame()
 
 # ==========================================
-# 2. 데이터 처리 메인 로직
+# 2. 필터링 및 데이터 처리
 # ==========================================
 
-# 사이드바 또는 상단에 필터 배치
 with st.sidebar:
-    st.header("⚙️ 필터 설정")
-    
-    # [핵심] 캘린더 날짜 필터 추가
+    st.header("⚙️ 필터 및 검색")
+    # 날짜 필터 (안전한 에러 처리 추가)
     today = date.today()
-    start_of_month = date(today.year, today.month, 1)
+    one_month_ago = today - timedelta(days=30)
     
     date_range = st.date_input(
-        "📅 조회 기간 선택",
-        value=(start_of_month, today),
-        help="공고일 기준 조회 범위를 선택하세요."
+        "📅 공고일 범위 선택",
+        value=(one_month_ago, today),
+        help="시작일과 종료일을 모두 클릭해 주세요."
     )
     
-    search_query = st.text_input("🔍 검색어 입력 (AI, 의료 등)", "")
+    search_query = st.text_input("🔍 검색어 (AI, 클라우드 등)", "")
 
-# 데이터 수집
-with st.spinner('실시간 데이터를 동기화 중입니다...'):
+with st.spinner('유관기관 최신 데이터를 불러오고 있습니다...'):
     df_khidi = get_khidi_data()
     df_nipa = get_nipa_data()
     df_nia = get_nia_data()
     df_msit = get_msit_data()
 
-# 데이터 병합
+# 통합
 dfs = [df for df in [df_khidi, df_nipa, df_nia, df_msit] if not df.empty]
 df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=["기관", "공고일", "제목", "접수기간", "원문링크"])
 
 if not df_all.empty:
-    # 날짜 필터링을 위해 datetime 형식으로 임시 변환
-    df_all['date_temp'] = pd.to_datetime(df_all['공고일'], format='%Y.%m.%d', errors='coerce').dt.date
+    # 날짜 변환
+    df_all['date_dt'] = pd.to_datetime(df_all['공고일'], format='%Y.%m.%d', errors='coerce').dt.date
     
-    # 기간 필터링 적용 (시작일과 종료일이 모두 선택되었을 때)
-    if len(date_range) == 2:
+    # [수정] 날짜 필터 안전장치: 범위가 2개(시작, 종료) 모두 선택된 경우에만 필터링
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
         start_date, end_date = date_range
-        filtered_df = df_all[(df_all['date_temp'] >= start_date) & (df_all['date_temp'] <= end_date)]
-    else:
-        filtered_df = df_all
+        df_all = df_all[(df_all['date_dt'] >= start_date) & (df_all['date_dt'] <= end_date)]
     
-    # 검색어 필터링 적용
+    # 검색어 필터
     if search_query:
-        filtered_df = filtered_df[filtered_df['제목'].str.contains(search_query, case=False)]
+        df_all = df_all[df_all['제목'].str.contains(search_query, case=False)]
     
-    # 최신순 정렬
-    filtered_df = filtered_df.sort_values(by="공고일", ascending=False)
-else:
-    filtered_df = df_all
+    df_all = df_all.sort_values(by="공고일", ascending=False)
 
 # ==========================================
-# 3. 탭 구성 (요청하신 expander 스타일)
+# 3. 결과 출력 (탭 구성)
 # ==========================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 전체보기", "🏛️ 한국보건산업진흥원", "🏛️ 정보통신산업진흥원", "🏛️ 한국지능정보사회진흥원", "🏛️ 과학기술정보통신부"
-])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 전체보기", "🏛️ KHIDI", "🏛️ NIPA", "🏛️ NIA", "🏛️ MSIT"])
 
 with tab1:
-    st.subheader(f"통합 검색 결과: {len(filtered_df)}건")
+    st.subheader(f"조회 결과: {len(df_all)}건")
     st.dataframe(
-        filtered_df,
+        df_all[["기관", "공고일", "제목", "원문링크"]],
         column_config={"원문링크": st.column_config.LinkColumn("링크", display_text="원문 보기 →")},
-        hide_index=True,
-        use_container_width=True
+        hide_index=True, use_container_width=True
     )
 
-with tab2:
-    st.markdown("### 한국보건산업진흥원(KHIDI) 공고")
-    sub_df = filtered_df[filtered_df['기관'] == '한국보건산업진흥원']
-    if sub_df.empty: st.info("공고가 없습니다.")
-    for idx, row in sub_df.iterrows():
-        with st.expander(f"[{row['공고일']}] {row['제목']}"):
-            st.markdown(f"[🔗 공고 원문 보러가기]({row['원문링크']})")
-
-with tab3:
-    st.markdown("### 정보통신산업진흥원(NIPA) 공고")
-    sub_df = filtered_df[filtered_df['기관'] == '정보통신산업진흥원']
-    if sub_df.empty: st.info("공고가 없습니다.")
-    for idx, row in sub_df.iterrows():
-        with st.expander(f"[{row['공고일']}] {row['제목']}"):
-            st.write(f"**⏳ 신청기간:** {row['접수기간']}")
-            st.markdown(f"[🔗 공고 원문 보러가기]({row['원문링크']})")
-
-with tab4:
-    st.markdown("### 한국지능정보사회진흥원(NIA) 공고")
-    sub_df = filtered_df[filtered_df['기관'] == '한국지능정보사회진흥원']
-    if sub_df.empty: st.info("공고가 없습니다.")
-    for idx, row in sub_df.iterrows():
-        with st.expander(f"[{row['공고일']}] {row['제목']}"):
-            st.markdown(f"[🔗 공고 원문 보러가기]({row['원문링크']})")
-
-with tab5:
-    st.markdown("### 과학기술정보통신부(MSIT) 공고")
-    sub_df = filtered_df[filtered_df['기관'] == '과학기술정보통신부']
-    if sub_df.empty: st.info("공고가 없습니다.")
-    for idx, row in sub_df.iterrows():
-        with st.expander(f"[{row['공고일']}] {row['제목']}"):
-            st.markdown(f"[🔗 공고 원문 보러가기]({row['원문링크']})")
+org_list = ["한국보건산업진흥원", "정보통신산업진흥원", "한국지능정보사회진흥원", "과학기술정보통신부"]
+for tab, org in zip([tab2, tab3, tab4, tab5], org_list):
+    with tab:
+        st.markdown(f"### {org} 최신 공고")
+        sub_df = df_all[df_all['기관'] == org]
+        if sub_df.empty:
+            st.info("조건에 맞는 공고가 없습니다.")
+        else:
+            for _, row in sub_df.iterrows():
+                with st.expander(f"[{row['공고일']}] {row['제목']}"):
+                    st.write(f"**⏳ 접수기간:** {row['접수기간']}")
+                    st.markdown(f"[🔗 공고 원문 보러가기]({row['원문링크']})")
