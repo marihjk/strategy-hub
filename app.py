@@ -6,7 +6,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import urllib3
 from curl_cffi import requests as cffi_requests
-from datetime import datetime, date, timedelta
+from datetime import datetime
 
 # 보안 경고 숨기기
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -46,7 +46,6 @@ def get_nipa_data():
         try:
             res = cffi_requests.get(url, impersonate="chrome120", verify=False, timeout=15)
             soup = BeautifulSoup(res.text, 'html.parser')
-            # NIPA: tr과 li 구조를 동시에 탐색
             items = soup.select('.board-list ul li, .board_list tbody tr, table tbody tr, a[href*="View.do"]')
             for item in items:
                 a_tag = item if item.name == 'a' else item.select_one('a')
@@ -110,22 +109,13 @@ def get_msit_data():
     return pd.DataFrame(all_data).drop_duplicates(subset=['제목']) if all_data else pd.DataFrame()
 
 # ==========================================
-# 2. 필터링 및 데이터 처리
+# 2. 데이터 처리 영역
 # ==========================================
 
 with st.sidebar:
-    st.header("⚙️ 필터 및 검색")
-    # 날짜 필터 (안전한 에러 처리 추가)
-    today = date.today()
-    one_month_ago = today - timedelta(days=30)
-    
-    date_range = st.date_input(
-        "📅 공고일 범위 선택",
-        value=(one_month_ago, today),
-        help="시작일과 종료일을 모두 클릭해 주세요."
-    )
-    
-    search_query = st.text_input("🔍 검색어 (AI, 클라우드 등)", "")
+    st.header("⚙️ 검색 설정")
+    # [변경] 날짜 필터 제거, 검색어 위젯만 유지
+    search_query = st.text_input("🔍 검색어 입력 (AI, 클라우드 등)", "")
 
 with st.spinner('유관기관 최신 데이터를 불러오고 있습니다...'):
     df_khidi = get_khidi_data()
@@ -133,33 +123,33 @@ with st.spinner('유관기관 최신 데이터를 불러오고 있습니다...')
     df_nia = get_nia_data()
     df_msit = get_msit_data()
 
-# 통합
+# 데이터 통합
 dfs = [df for df in [df_khidi, df_nipa, df_nia, df_msit] if not df.empty]
 df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=["기관", "공고일", "제목", "접수기간", "원문링크"])
 
 if not df_all.empty:
-    # 날짜 변환
-    df_all['date_dt'] = pd.to_datetime(df_all['공고일'], format='%Y.%m.%d', errors='coerce').dt.date
-    
-    # [수정] 날짜 필터 안전장치: 범위가 2개(시작, 종료) 모두 선택된 경우에만 필터링
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        start_date, end_date = date_range
-        df_all = df_all[(df_all['date_dt'] >= start_date) & (df_all['date_dt'] <= end_date)]
-    
-    # 검색어 필터
+    # [변경] 날짜 필터링 로직 제거
+    # 검색어 필터만 수행
     if search_query:
         df_all = df_all[df_all['제목'].str.contains(search_query, case=False)]
     
+    # 공고일 기준 최신순 정렬
     df_all = df_all.sort_values(by="공고일", ascending=False)
 
 # ==========================================
 # 3. 결과 출력 (탭 구성)
 # ==========================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 전체보기", "🏛️ 한국보건산업진흥원(KHIDI)", "🏛️ 정보통신산업진흥원(NIPA)", "🏛️ 한국지능정보사회진흥원(NIA)", "🏛️ 과학기술정보통신부(MSIT)"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 전체보기", 
+    "🏛️ 한국보건산업진흥원(KHIDI)", 
+    "🏛️ 정보통신산업진흥원(NIPA)", 
+    "🏛️ 한국지능정보사회진흥원(NIA)", 
+    "🏛️ 과학기술정보통신부(MSIT)"
+])
 
 with tab1:
-    st.subheader(f"조회 결과: {len(df_all)}건")
+    st.subheader(f"전체 공고: {len(df_all)}건")
     st.dataframe(
         df_all[["기관", "공고일", "제목", "원문링크"]],
         column_config={"원문링크": st.column_config.LinkColumn("링크", display_text="원문 보기 →")},
@@ -172,7 +162,7 @@ for tab, org in zip([tab2, tab3, tab4, tab5], org_list):
         st.markdown(f"### {org} 최신 공고")
         sub_df = df_all[df_all['기관'] == org]
         if sub_df.empty:
-            st.info("조건에 맞는 공고가 없습니다.")
+            st.info("해당하는 공고가 없습니다.")
         else:
             for _, row in sub_df.iterrows():
                 with st.expander(f"[{row['공고일']}] {row['제목']}"):
