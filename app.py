@@ -48,7 +48,6 @@ def get_nipa_data():
         try:
             res = cffi_requests.get(url, impersonate="chrome116", verify=False, timeout=10)
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 본문 영역의 모든 링크 탐색 (가장 확실한 방식)
             links = soup.select('a[href*="View.do"], .board-list a, .board_list a, table a')
             for a in links:
                 title = a.get_text(strip=True)
@@ -56,7 +55,6 @@ def get_nipa_data():
                 href = a.get('href', '')
                 link = "https://www.nipa.kr" + href if href.startswith('/') else url
                 
-                # 부모 요소를 뒤져서 날짜와 신청기간 추출
                 parent = a.find_parent(['li', 'tr', 'div'])
                 parent_text = parent.get_text(separator=' ', strip=True) if parent else ""
                 
@@ -79,7 +77,6 @@ def get_nia_data():
         try:
             res = cffi_requests.get(url, impersonate="chrome116", verify=False, timeout=10)
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 모든 링크를 긁어온 뒤 날짜가 있는 것만 필터링 (가장 강력한 유실 방지책)
             links = soup.select('a[href]')
             for a in links:
                 title = a.get_text(strip=True)
@@ -89,7 +86,7 @@ def get_nia_data():
                 parent_text = parent.get_text(separator=' ', strip=True) if parent else ""
                 
                 date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', parent_text)
-                if not date_match: continue # 날짜가 없는 링크(메뉴 등)는 버림
+                if not date_match: continue
                 
                 href = a.get('href', '')
                 link = "https://www.nia.or.kr/site/nia_kor/ex/bbs/" + href if not href.startswith('http') else href
@@ -103,7 +100,6 @@ def get_nia_data():
 @st.cache_data(ttl=3600)
 def get_msit_data():
     all_data = []
-    # 과기부 전용 헤더 추가 (Referer 필수)
     msit_headers = {
         'Referer': 'https://msit.go.kr/bbs/list.do?sCode=user&mId=311&mPid=121',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -113,24 +109,21 @@ def get_msit_data():
     for page in range(1, 6):
         url = f"https://msit.go.kr/bbs/list.do?sCode=user&mId=311&mPid=121&pageIndex={page}&bbsSeqNo=100"
         try:
-            # impersonate="chrome120"과 전용 헤더 사용
             res = cffi_requests.get(url, impersonate="chrome120", headers=msit_headers, verify=False, timeout=15)
             res.encoding = 'utf-8'
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            # 1. 모든 'view.do' 링크가 포함된 행(tr)을 싹 훑습니다.
             rows = soup.find_all('tr')
             for row in rows:
                 a_tag = row.select_one('a[href*="view.do"]')
                 if not a_tag: continue
                 
                 title = a_tag.get_text(strip=True)
-                if len(title) < 5: continue # 너무 짧은 텍스트 제외
+                if len(title) < 5: continue
                 
                 href = a_tag.get('href', '')
                 link = "https://msit.go.kr" + href if href.startswith('/') else url
                 
-                # 2. 날짜 찾기: 행 내에서 YYYY-MM-DD 패턴을 가진 모든 텍스트 검색
                 row_text = row.get_text(separator=' ', strip=True)
                 date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', row_text)
                 date_str = date_match.group().replace('-', '.') if date_match else "날짜 확인 필요"
@@ -144,23 +137,12 @@ def get_msit_data():
     return pd.DataFrame()
 
 # ==========================================
-# 2. 데이터 처리 메인 로직
+# 2. 데이터 처리 메인 로직 (날짜 필터 제거됨)
 # ==========================================
 
-# 사이드바 또는 상단에 필터 배치
+# 사이드바 필터 설정
 with st.sidebar:
     st.header("⚙️ 필터 설정")
-    
-    # [핵심] 캘린더 날짜 필터 추가
-    today = date.today()
-    start_of_month = date(today.year, today.month, 1)
-    
-    date_range = st.date_input(
-        "📅 조회 기간 선택",
-        value=(start_of_month, today),
-        help="공고일 기준 조회 범위를 선택하세요."
-    )
-    
     search_query = st.text_input("🔍 검색어 입력 (AI, 의료 등)", "")
 
 # 데이터 수집
@@ -174,18 +156,11 @@ with st.spinner('실시간 데이터를 동기화 중입니다...'):
 dfs = [df for df in [df_khidi, df_nipa, df_nia, df_msit] if not df.empty]
 df_all = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=["기관", "공고일", "제목", "접수기간", "원문링크"])
 
+# 필터링 적용
 if not df_all.empty:
-    # 날짜 필터링을 위해 datetime 형식으로 임시 변환
-    df_all['date_temp'] = pd.to_datetime(df_all['공고일'], format='%Y.%m.%d', errors='coerce').dt.date
+    filtered_df = df_all.copy()
     
-    # 기간 필터링 적용 (시작일과 종료일이 모두 선택되었을 때)
-    if len(date_range) == 2:
-        start_date, end_date = date_range
-        filtered_df = df_all[(df_all['date_temp'] >= start_date) & (df_all['date_temp'] <= end_date)]
-    else:
-        filtered_df = df_all
-    
-    # 검색어 필터링 적용
+    # 검색어 필터링만 적용
     if search_query:
         filtered_df = filtered_df[filtered_df['제목'].str.contains(search_query, case=False)]
     
@@ -195,7 +170,7 @@ else:
     filtered_df = df_all
 
 # ==========================================
-# 3. 탭 구성 (요청하신 expander 스타일)
+# 3. 탭 구성
 # ==========================================
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
