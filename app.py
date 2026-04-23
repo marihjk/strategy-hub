@@ -38,67 +38,125 @@ def get_khidi_data():
         return pd.DataFrame(data)
     except: return pd.DataFrame()
 
-# [함수 2] 정보통신산업진흥원(NIPA) - 1~5페이지
+# [함수 2] 정보통신산업진흥원(NIPA) - 1~2페이지
 @st.cache_data(ttl=3600)
 def get_nipa_data():
     all_data = []
-    for page in range(1, 6):
+    for page in range(1, 3):
         url = f"https://www.nipa.kr/home/2-2?curPage={page}"
         try:
             res = cffi_requests.get(url, impersonate="chrome116", verify=False, timeout=10)
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 본문 영역의 모든 링크 탐색 (가장 확실한 방식)
+            
+            # 본문 영역의 모든 링크 탐색
             links = soup.select('a[href*="View.do"], .board-list a, .board_list a, table a')
+            
             for a in links:
                 title = a.get_text(strip=True)
                 if len(title) < 10: continue
+                
                 href = a.get('href', '')
                 link = "https://www.nipa.kr" + href if href.startswith('/') else url
                 
-                # 부모 요소를 뒤져서 날짜와 신청기간 추출
-                parent = a.find_parent(['li', 'tr', 'div'])
-                parent_text = parent.get_text(separator=' ', strip=True) if parent else ""
+                # 1. 부모 요소를 <tr>(테이블 행 전체)로 명확히 지정하여 탐색 범위를 넓힘
+                tr = a.find_parent('tr')
                 
-                period_match = re.search(r'신청기간\s*[:]\s*([0-9\-\:\s~]+)', parent_text)
+                if not tr:
+                    continue
+                
+                # 2. [핵심] 캡처 화면에서 확인된 <span class="bco"> 태그를 직접 찌름 (가장 정확)
+                date_span = tr.select_one('span.bco')
+                
+                if date_span:
+                    date_str = date_span.get_text(strip=True).replace('-', '.')
+                else:
+                    # 혹시 span.bco가 없는 예외 케이스를 대비해 정규식 플랜B 가동
+                    tr_text = tr.get_text(separator=' ', strip=True)
+                    date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', tr_text)
+                    date_str = date_match.group().replace('-', '.') if date_match else "날짜 확인 필요"
+                
+                # 3. 신청기간 추출 (행 전체 텍스트에서 정규식으로 뽑아냄)
+                full_text = tr.get_text(separator=' ', strip=True)
+                period_match = re.search(r'신청기간\s*[:]\s*([0-9\-\:\s~]+)', full_text)
                 period = period_match.group(1).strip() if period_match else "공고문 참조"
                 
-                date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', parent_text)
-                date_str = date_match.group().replace('-', '.') if date_match else "날짜 확인 필요"
-                
-                all_data.append({"기관": "정보통신산업진흥원", "공고일": date_str, "제목": title, "접수기간": period, "원문링크": link})
+                all_data.append({
+                    "기관": "정보통신산업진흥원", 
+                    "공고일": date_str, 
+                    "제목": title, 
+                    "접수기간": period, 
+                    "원문링크": link
+                })
         except: continue
-    return pd.DataFrame(all_data).drop_duplicates(subset=['제목']) if all_data else pd.DataFrame()
+        
+    df = pd.DataFrame(all_data)
+    if not df.empty:
+        return df.drop_duplicates(subset=['제목'])
+    return pd.DataFrame(columns=["기관", "공고일", "제목", "접수기간", "원문링크"])
 
-# [함수 3] 한국지능정보사회진흥원(NIA) - 1~5페이지
+# [함수 3] 한국지능정보사회진흥원(NIA) - 1~2페이지
 @st.cache_data(ttl=3600)
 def get_nia_data():
     all_data = []
-    for page in range(1, 6):
-        url = f"https://www.nia.or.kr/site/nia_kor/ex/bbs/List.do?cbIdx=99835&pageIndex={page}"
-        try:
-            res = cffi_requests.get(url, impersonate="chrome116", verify=False, timeout=10)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            # 모든 링크를 긁어온 뒤 날짜가 있는 것만 필터링 (가장 강력한 유실 방지책)
-            links = soup.select('a[href]')
-            for a in links:
-                title = a.get_text(strip=True)
-                if len(title) < 10: continue
+    # NIA 공고 목록 페이지
+    list_url = "https://www.nia.or.kr/site/nia_kor/ex/bbs/List.do?cbIdx=99835"
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+
+    try:
+        res = cffi_requests.get(list_url, impersonate="chrome120", headers=headers, verify=False, timeout=15)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 표의 행(tr) 또는 리스트(li) 단위를 모두 탐색
+        items = soup.find_all(['tr', 'li'])
+        
+        for item in items:
+            item_text = item.get_text(separator=' ', strip=True)
+            
+            # 해당 줄에 'YYYY-MM-DD' 또는 'YYYY.MM.DD' 형식의 날짜가 있는지 확인
+            date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', item_text)
+            
+            # 날짜가 있고, 그 안에 링크(a 태그)가 있다면 100% 게시물 행입니다.
+            if date_match:
+                a_tag = item.find('a')
+                if not a_tag: continue
                 
-                parent = a.find_parent(['li', 'tr', 'div'])
-                parent_text = parent.get_text(separator=' ', strip=True) if parent else ""
+                title = a_tag.get_text(strip=True)
+
+                # 'new2026' 같은 아이콘 텍스트나 '조회수'라는 단어를 기점으로 문자열을 쪼갠 후 앞부분만 가져옵니다.
+                title = re.split(r'new20\d{2}|조회수', title)[0].strip()
                 
-                date_match = re.search(r'\d{4}[\-\.]\d{2}[\-\.]\d{2}', parent_text)
-                if not date_match: continue # 날짜가 없는 링크(메뉴 등)는 버림
+                # 가끔 "새글" 같은 아이콘 텍스트가 딸려오는 경우 제거
+                title = re.sub(r'새글|첨부파일', '', title).strip()
                 
-                href = a.get('href', '')
-                link = "https://www.nia.or.kr/site/nia_kor/ex/bbs/" + href if not href.startswith('http') else href
+                # 제목이 너무 짧으면 패스 (예: 단순 번호나 메뉴)
+                if len(title) < 5: continue
+                
                 date_str = date_match.group().replace('-', '.')
                 
-                all_data.append({"기관": "한국지능정보사회진흥원", "공고일": date_str, "제목": title, "접수기간": "공고문 참조", "원문링크": link})
-        except: continue
-    return pd.DataFrame(all_data).drop_duplicates(subset=['제목']) if all_data else pd.DataFrame()
+                all_data.append({
+                    "기관": "한국지능정보사회진흥원", 
+                    "공고일": date_str, 
+                    "제목": title, 
+                    "접수기간": "공고 목록에서 확인", 
+                    "원문링크": list_url # 상세페이지 에러를 피하기 위해 무조건 목록으로 연결
+                })
+                
+    except Exception as e:
+        # 에러 발생 시 앱이 죽지 않도록 조용히 넘김
+        pass
+        
+    df = pd.DataFrame(all_data)
+    
+    if not df.empty:
+        # 중복 제거 후 가장 최신 데이터 반환
+        return df.drop_duplicates(subset=['제목'])
+        
+    return pd.DataFrame(columns=["기관", "공고일", "제목", "접수기간", "원문링크"])
 
-# [함수 4] 과학기술정보통신부(MSIT) - 1~5페이지
+# [함수 4] 과학기술정보통신부(MSIT) - 1~2페이지
 @st.cache_data(ttl=3600)
 def get_msit_data():
     all_data = []
@@ -109,7 +167,7 @@ def get_msit_data():
         'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
     }
     
-    for page in range(1, 6):
+    for page in range(1, 3):
         url = f"https://msit.go.kr/bbs/list.do?sCode=user&mId=311&mPid=121&pageIndex={page}&bbsSeqNo=100"
         try:
             # impersonate="chrome120"과 전용 헤더 사용
